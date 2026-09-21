@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kouakou~Renfo – séances et encaissements</title>
+  <meta name="theme-color" content="#14263D">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="32x32" href="icon-32.png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="bar">
+    <div class="marque">
+      <img class="logo" src="logo.png" alt="" width="40" height="40">
+      <span>Kouakou~Renfo</span>
+    </div>
+    <nav class="niveaux" aria-label="Niveaux d'étude">
+      <a href="#/L1/seance" data-niveau="L1">L1</a>
+      <a href="#/L2/seance" data-niveau="L2">L2</a>
+      <a href="#/L3/seance" data-niveau="L3">L3</a>
+    </nav>
+    <div class="outils">
+      <span id="etat"></span>
+      <button type="button" id="btn-rafraichir" hidden>Rafraîchir</button>
+      <button type="button" id="btn-params">Paramètres</button>
+    </div>
+  </header>
+
+  <main id="app"></main>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+  <dialog id="dlg" aria-labelledby="dlg-titre"></dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>

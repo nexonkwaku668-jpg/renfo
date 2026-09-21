@@ -1,0 +1,13 @@
+{
+  "name": "Kouakou~Renfo – suivi des séances et encaissements",
+  "short_name": "Kouakou~Renfo",
+  "lang": "fr",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#14263D",
+  "theme_color": "#14263D",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
