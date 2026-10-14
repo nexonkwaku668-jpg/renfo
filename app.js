@@ -24,15 +24,22 @@ const MODES = [
   { v: 'SEANCE', label: 'Séance en avance' },
 ];
 const LIB_MODE = Object.fromEntries(MODES.map(m => [m.v, m.label]));
-const LIB_TYPE = { ENCAISSEMENT: 'Séance', REGLEMENT: 'Règlement du solde', ANNULATION: 'Annulation' };
+const LIB_TYPE = { ENCAISSEMENT: 'Séance', REGLEMENT: 'Règlement du solde', INSCRIPTION: 'Inscription/adhésion', ANNULATION: 'Annulation' };
 const OPERATEURS = ['Orange Money', 'MTN MoMo', 'Moov Money'];
+// Club : séances gratuites, une adhésion à solder par niveau. Renfo : frais d'inscription unique puis tarif par séance.
+const CATEGORIES = [{ v: 'RENFO', label: 'Renfo (payant)' }, { v: 'CLUB', label: 'Club (adhérent)' }];
+const LIB_CATEGORIE = Object.fromEntries(CATEGORIES.map(c => [c.v, c.label]));
+const FRAIS_RENFO = 3000;
+const FRAIS_CLUB = { L1: 30000, L2: 25000, L3: 25000 };
+const EXTRA_MAX = 20;             // séances supplémentaires achetables en une fois
 const CHAMPS = [
   ['id', "N° d'ordre"], ['nom', 'Nom et prénoms'], ['contact', 'Contact'], ['email', 'E-mail'],
-  ['filiere', 'Filière'], ['statut', "Statut d'inscription"], ['avance', 'Séances en avance'],
-  ['arriere', 'Séances non réglées'], ['creance', 'Créance'], ['redevance', 'Redevance'],
-  ['presence', 'Présence'], ['tampon', 'Tampon'], ['solde', 'Solde'],
+  ['filiere', 'Filière'], ['statut', "Statut d'inscription"], ['categorie', 'Catégorie'],
+  ['avance', 'Séances en avance'], ['arriere', 'Séances non réglées'], ['creance', 'Créance'],
+  ['redevance', 'Redevance'], ['presence', 'Présence'], ['tampon', 'Tampon'], ['solde', 'Solde'],
+  ['inscription', 'Inscription ou adhésion versée'],
 ];
-const NOMBRES = new Set(['id', 'avance', 'arriere', 'creance', 'redevance', 'tampon', 'solde']);
+const NOMBRES = new Set(['id', 'avance', 'arriere', 'creance', 'redevance', 'tampon', 'solde', 'inscription']);
 // En-têtes de l'ancien classeur Excel reconnus à l'import (après normalisation)
 const ALIAS_ENTETES = {
   'nom et prenom': 'nom', 'n d ordre': 'id', 'e mail': 'email', 'filere': 'filiere',
@@ -109,8 +116,8 @@ const seances = s => s.presence === 'OUI' ? s.tampon + 1
 
 const liste = () => state.data[state.niveau];
 const nouvelEleve = id => ({
-  id, nom: '', contact: '', email: '', filiere: '', statut: 'OUI',
-  avance: 0, arriere: 0, creance: 0, redevance: 0, presence: ATTENTE, tampon: 0, solde: 0,
+  id, nom: '', contact: '', email: '', filiere: '', statut: 'OUI', categorie: 'RENFO',
+  avance: 0, arriere: 0, creance: 0, redevance: 0, presence: ATTENTE, tampon: 0, solde: 0, inscription: 0,
 });
 const prochainId = l => l.reduce((m, s) => Math.max(m, s.id), 0) + 1;
 const filtrer = l => {
@@ -121,18 +128,26 @@ const filtrer = l => {
 // Solde de l'élève : positif = on lui doit de l'argent (monnaie à rendre), négatif = il nous doit.
 const soldeTexte = s => s.solde > 0 ? `On lui doit ${fcfa(s.solde)}` : s.solde < 0 ? `Il doit ${fcfa(-s.solde)}` : 'Aucun';
 
+// Frais unique dû selon la catégorie et le niveau, et ce qu'il en reste à régler.
+const fraisDus = (niveau, categorie) => categorie === 'CLUB' ? (FRAIS_CLUB[niveau] || 0) : FRAIS_RENFO;
+const resteInscription = (s, niveau) => Math.max(0, fraisDus(niveau, s.categorie) - s.inscription);
+const libelleInscription = categorie => categorie === 'CLUB' ? 'Adhésion' : 'Inscription';
+
 // Calcul d'un encaissement (même règle dans Code.gs). Lève une erreur si la saisie est incohérente.
-function calculerEncaissement({ mode, recu, rendu, precision }, tarif, avance) {
+// « extra » : séances supplémentaires achetées d'avance en même temps que la séance du jour.
+function calculerEncaissement({ mode, recu, rendu, precision, extra }, tarif, avance) {
   if (!LIB_MODE[mode]) throw new Error('Mode de paiement inconnu.');
   if (mode === 'SEANCE') {
     if (avance < 1) throw new Error("Cet élève n'a aucune séance en avance.");
-    return { du: tarif, recu: 0, rendu: 0, net: 0, effetSolde: 0, effetAvance: -1, precision: '' };
+    return { du: tarif, recu: 0, rendu: 0, net: 0, effetSolde: 0, effetAvance: -1, effetInscription: 0, precision: '' };
   }
+  extra = Math.min(EXTRA_MAX, entier(extra));
+  const du = tarif * (1 + extra);
   recu = entier(recu); rendu = entier(rendu);
   precision = String(precision || '').trim().slice(0, 80);
   if (mode === 'AUTRE' && !precision) throw new Error("Précisez l'application utilisée.");
-  if (rendu > Math.max(0, recu - tarif)) throw new Error('La monnaie rendue dépasse la monnaie due.');
-  return { du: tarif, recu, rendu, net: recu - rendu, effetSolde: recu - rendu - tarif, effetAvance: 0,
+  if (rendu > Math.max(0, recu - du)) throw new Error('La monnaie rendue dépasse la monnaie due.');
+  return { du, recu, rendu, net: recu - rendu, effetSolde: recu - rendu - du, effetAvance: extra, effetInscription: 0,
     precision: mode === 'ESPECES' ? '' : precision };
 }
 
@@ -145,7 +160,18 @@ function calculerReglement({ montant, mode, precision }, solde) {
   precision = String(precision || '').trim().slice(0, 80);
   if (mode === 'AUTRE' && !precision) throw new Error("Précisez l'application utilisée.");
   const sens = solde > 0 ? -1 : 1;
-  return { recu: m, net: sens * m, effetSolde: sens * m, precision: mode === 'ESPECES' ? '' : precision };
+  return { recu: m, net: sens * m, effetSolde: sens * m, effetInscription: 0, precision: mode === 'ESPECES' ? '' : precision };
+}
+
+// Paiement (total ou partiel) du frais d'inscription (Renfo) ou d'adhésion (Club).
+function calculerInscription({ montant, mode, precision }, reste) {
+  if (!LIB_MODE[mode] || mode === 'SEANCE') throw new Error('Mode de paiement invalide.');
+  if (reste <= 0) throw new Error("Il n'y a plus rien à régler pour cet élève.");
+  const m = entier(montant);
+  if (m < 1 || m > reste) throw new Error(`Le montant doit être compris entre 1 et ${reste} FCFA.`);
+  precision = String(precision || '').trim().slice(0, 80);
+  if (mode === 'AUTRE' && !precision) throw new Error("Précisez l'application utilisée.");
+  return { recu: m, net: m, effetInscription: m, precision: mode === 'ESPECES' ? '' : precision };
 }
 
 const encaissementDuJour = (niveau, id) => state.paiements.find(x =>
@@ -179,11 +205,11 @@ async function commit(action, p, { silencieux = false } = {}) {
   }
 }
 
-// Encaissements, règlements et annulations : en ligne, c'est le service qui décide (pas d'affichage anticipé).
+// Encaissements, règlements, inscriptions et annulations : en ligne, c'est le service qui décide (pas d'affichage anticipé).
 function appliquerCaisse(action, p) {
   if (state.paiements.some(x => x.ref === p.ref)) return;   // déjà enregistré (double envoi)
   const base = { ref: p.ref, horodatage: new Date().toISOString(), date: aujourdhui(), niveau: p.niveau,
-    utilisateur: state.utilisateur, annulePar: '', annulationDe: '' };
+    utilisateur: state.utilisateur, annulePar: '', annulationDe: '', modifie: '' };
   const trouver = (niveau, id) => {
     const s = state.data[niveau].find(x => x.id === id);
     if (!s) throw new Error('Élève introuvable.');
@@ -191,6 +217,7 @@ function appliquerCaisse(action, p) {
   };
   if (action === 'encaisser') {
     const s = trouver(p.niveau, p.id);
+    if (s.categorie === 'CLUB') throw new Error('Les séances sont gratuites pour les adhérents du club.');
     if (encaissementDuJour(p.niveau, s.id)) {
       throw new Error("Un encaissement est déjà enregistré aujourd'hui pour cet élève. Un administrateur peut l'annuler dans la Caisse.");
     }
@@ -202,17 +229,34 @@ function appliquerCaisse(action, p) {
     const r = calculerReglement(p, s.solde);
     s.solde += r.effetSolde;
     state.paiements.push({ ...base, eleve: s.id, nom: s.nom, type: 'REGLEMENT', mode: p.mode,
-      du: 0, recu: r.recu, rendu: 0, net: r.net, effetSolde: r.effetSolde, effetAvance: 0, precision: r.precision });
+      du: 0, recu: r.recu, rendu: 0, net: r.net, effetSolde: r.effetSolde, effetAvance: 0, effetInscription: 0, precision: r.precision });
+  } else if (action === 'inscrire') {
+    const s = trouver(p.niveau, p.id);
+    const r = calculerInscription(p, resteInscription(s, p.niveau));
+    s.inscription += r.effetInscription;
+    state.paiements.push({ ...base, eleve: s.id, nom: s.nom, type: 'INSCRIPTION', mode: p.mode,
+      du: 0, recu: r.recu, rendu: 0, net: r.net, effetSolde: 0, effetAvance: 0, effetInscription: r.effetInscription, precision: r.precision });
   } else if (action === 'annuler') {
     if (state.role !== 'admin') throw new Error('Action réservée aux administrateurs.');
     const o = state.paiements.find(x => x.ref === p.cible);
     if (!o || o.annulePar || o.type === 'ANNULATION') throw new Error('Opération introuvable ou déjà annulée.');
     const s = trouver(o.niveau, o.eleve);
-    s.solde -= o.effetSolde; s.avance -= o.effetAvance;
+    s.solde -= o.effetSolde; s.avance -= o.effetAvance; s.inscription -= (o.effetInscription || 0);
     o.annulePar = p.ref;
     state.paiements.push({ ...base, niveau: o.niveau, eleve: o.eleve, nom: o.nom, type: 'ANNULATION', mode: o.mode,
       precision: o.precision, du: 0, recu: 0, rendu: 0, net: -o.net, effetSolde: -o.effetSolde,
-      effetAvance: -o.effetAvance, annulationDe: o.ref });
+      effetAvance: -o.effetAvance, effetInscription: -(o.effetInscription || 0), annulationDe: o.ref });
+  } else if (action === 'modifierMode') {
+    if (state.role !== 'admin') throw new Error('Action réservée aux administrateurs.');
+    const o = state.paiements.find(x => x.ref === p.cible);
+    if (!o) throw new Error('Opération introuvable.');
+    if (o.date !== aujourdhui()) throw new Error("Cette opération date d'un autre jour.");
+    if (o.modifie) throw new Error('Le mode de paiement a déjà été corrigé une fois pour cette opération.');
+    if (o.type === 'ANNULATION' || o.mode === 'SEANCE') throw new Error('Mode non modifiable pour cette opération.');
+    if (!LIB_MODE[p.mode] || p.mode === 'SEANCE') throw new Error('Mode de paiement invalide.');
+    const precision = String(p.precision || '').trim().slice(0, 80);
+    if (p.mode === 'AUTRE' && !precision) throw new Error("Précisez l'application utilisée.");
+    o.mode = p.mode; o.precision = p.mode === 'ESPECES' ? '' : precision; o.modifie = 'oui';
   }
 }
 
@@ -230,7 +274,7 @@ function chargerLocal() {
       state.data = brut.data; state.settings = brut.settings || state.settings; state.paiements = brut.paiements || [];
     }
   } catch (_) { /* première utilisation */ }
-  for (const n of NIVEAUX) state.data[n] = (state.data[n] || []).map(s => ({ solde: 0, ...s }));
+  for (const n of NIVEAUX) state.data[n] = (state.data[n] || []).map(s => ({ solde: 0, categorie: 'RENFO', inscription: 0, ...s }));
   state.role = 'admin'; state.utilisateur = 'Local'; state.charge = true;
 }
 function sauverLocal() {
@@ -318,21 +362,31 @@ function vide() {
 
 const libPaiement = p => LIB_MODE[p.mode] + (p.mode === 'AUTRE' && p.precision ? ` (${p.precision})` : '');
 
-// Bouton « Encaisser », ou rappel du paiement déjà enregistré aujourd'hui
-function paiementCellule(s) {
-  const p = encaissementDuJour(state.niveau, s.id);
+// Bouton « Encaisser », rappel du paiement déjà enregistré, ou mention de gratuité pour le club
+function paiementCellule(s, niveau) {
+  if (s.categorie === 'CLUB') return h('span', { class: 'gratuit' }, 'Gratuit (Club)');
+  const p = encaissementDuJour(niveau, s.id);
   if (p) {
     return h('span', { class: 'paye', title: `Enregistré à ${heure(p.horodatage)} par ${p.utilisateur}` },
       h('b', null, 'Payé'), h('small', null, libPaiement(p)));
   }
   return h('button', { type: 'button', class: 'primaire encaisser', 'data-k': `${s.id}-pay`,
-    onclick: () => ouvrirEncaisser(s, state.niveau) }, 'Encaisser');
+    onclick: () => ouvrirEncaisser(s, niveau) }, 'Encaisser');
 }
 
 const boutonSolde = (s, niveau) => s.solde !== 0 && h('button', {
   type: 'button', class: `solde ${s.solde > 0 ? 'du' : 'dette'}`, onclick: () => ouvrirRegler(s, niveau),
   title: s.solde > 0 ? 'Rendre la monnaie due' : "Encaisser ce que l'élève doit",
 }, soldeTexte(s));
+
+// Bouton d'inscription (Renfo) ou d'adhésion (Club), tant qu'il reste un montant à régler
+const boutonInscription = (s, niveau) => {
+  const reste = resteInscription(s, niveau);
+  return reste > 0 && h('button', {
+    type: 'button', class: 'solde inscription', onclick: () => ouvrirInscription(s, niveau),
+    title: `${libelleInscription(s.categorie)} : reste ${fcfa(reste)} sur ${fcfa(fraisDus(niveau, s.categorie))}`,
+  }, `${libelleInscription(s.categorie)} : reste ${fcfa(reste)}`);
+};
 
 /* ---------- Fenêtres : encaisser / régler ---------- */
 function champForm(libelle, ...contenu) { return h('label', { class: 'cf' }, h('span', null, libelle), ...contenu); }
@@ -342,8 +396,10 @@ function ouvrirEncaisser(s, niveau) {
   const tarif = state.settings.tarif;
   const ref = nouvelleRef();                       // même référence si l'envoi est répété : pas de doublon
   let mode = 'ESPECES';
-  const recu = h('input', { type: 'number', min: 0, step: 50, inputmode: 'numeric', value: tarif });
-  const rendu = h('input', { type: 'number', min: 0, step: 50, inputmode: 'numeric', value: 0 });
+  const extra = h('input', { type: 'number', min: 0, max: EXTRA_MAX, step: 1, inputmode: 'numeric', value: 0 });
+  const lExtra = champForm('Séances supplémentaires achetées maintenant', extra);
+  const recu = h('input', { type: 'number', min: 0, step: 1, inputmode: 'numeric', value: tarif });
+  const rendu = h('input', { type: 'number', min: 0, step: 1, inputmode: 'numeric', value: 0 });
   const prec = h('input', { type: 'text', maxlength: 80, list: 'operateurs', autocomplete: 'off' });
   const libPrec = h('span');
   const lRecu = champForm('Montant remis par l\'élève (FCFA)', recu);
@@ -353,15 +409,19 @@ function ouvrirEncaisser(s, niveau) {
   const erreur = h('p', { class: 'erreur', role: 'alert' });
   const valider = h('button', { type: 'submit', class: 'primaire' }, "Enregistrer l'encaissement");
   const boutons = MODES.map(m => h('button', {
-    type: 'button', class: 'chip mode', 'aria-pressed': 'false', onclick: () => { mode = m.v; maj(); },
+    type: 'button', class: 'chip mode', 'aria-pressed': 'false', onclick: () => { mode = m.v; maj(true); },
   }, m.v === 'SEANCE' ? `${m.label} (${s.avance})` : m.label));
 
-  function maj() {
+  function maj(recalculerRecu) {
     boutons.forEach((b, i) => b.setAttribute('aria-pressed', String(MODES[i].v === mode)));
     const seance = mode === 'SEANCE';
+    const ex = Math.min(EXTRA_MAX, entier(extra.value));
+    const du = tarif * (1 + ex);
+    if (recalculerRecu) recu.value = seance ? tarif : du;
     const r = entier(recu.value);
+    lExtra.hidden = seance;
     lRecu.hidden = seance;
-    lRendu.hidden = seance || r <= tarif;
+    lRendu.hidden = seance || r <= du;
     lPrec.hidden = !(mode === 'AUTRE' || mode === 'WAVE');
     libPrec.textContent = mode === 'AUTRE' ? 'Application utilisée' : 'Référence de la transaction (facultatif)';
     erreur.textContent = '';
@@ -371,20 +431,22 @@ function ouvrirEncaisser(s, niveau) {
         : "Cet élève n'a aucune séance en avance.";
       valider.disabled = s.avance < 1;
     } else {
-      const rd = Math.min(entier(rendu.value), Math.max(0, r - tarif));
-      const reste = r - rd - tarif;
-      resume.textContent = `Encaissé : ${fcfa(r - rd)}. ` + (reste === 0 ? 'Le compte est bon.'
-        : reste > 0 ? `On lui devra ${fcfa(reste)} (monnaie à rendre plus tard).`
-        : `Il devra ${fcfa(-reste)} (à régler plus tard).`);
+      const rd = Math.min(entier(rendu.value), Math.max(0, r - du));
+      const reste = r - rd - du;
+      resume.textContent = `Dû : ${fcfa(du)}` + (ex ? ` (séance + ${ex} en avance)` : '') + `. Encaissé : ${fcfa(r - rd)}. ` +
+        (reste === 0 ? 'Le compte est bon.'
+          : reste > 0 ? `On lui devra ${fcfa(reste)} (monnaie à rendre plus tard).`
+          : `Il devra ${fcfa(-reste)} (à régler plus tard).`);
       valider.disabled = false;
     }
   }
-  recu.addEventListener('input', () => { rendu.value = Math.max(0, entier(recu.value) - tarif); maj(); });
-  rendu.addEventListener('input', maj);
+  extra.addEventListener('input', () => maj(true));
+  recu.addEventListener('input', () => { const ex = Math.min(EXTRA_MAX, entier(extra.value)); rendu.value = Math.max(0, entier(recu.value) - tarif * (1 + ex)); maj(false); });
+  rendu.addEventListener('input', () => maj(false));
 
   async function envoyer(ev) {
     ev.preventDefault();
-    const p = { niveau, id: s.id, mode, recu: recu.value, rendu: rendu.value, precision: prec.value, ref };
+    const p = { niveau, id: s.id, mode, recu: recu.value, rendu: rendu.value, precision: prec.value, extra: extra.value, ref };
     try { calculerEncaissement(p, tarif, s.avance); } catch (e) { erreur.textContent = e.message; return; }
     valider.disabled = true; valider.textContent = 'Enregistrement…';
     try {
@@ -402,18 +464,18 @@ function ouvrirEncaisser(s, niveau) {
     h('p', null, `Montant de la séance : `, h('b', null, fcfa(tarif)),
       s.solde !== 0 && h('span', { class: `solde-note ${s.solde > 0 ? 'du' : 'dette'}` }, ` · ${soldeTexte(s)}`)),
     h('div', { class: 'chips', role: 'group', 'aria-label': 'Mode de paiement' }, boutons),
-    lRecu, lRendu, lPrec, resume, erreur,
+    lExtra, lRecu, lRendu, lPrec, resume, erreur,
     h('datalist', { id: 'operateurs' }, OPERATEURS.map(o => h('option', { value: o }))),
     h('div', { class: 'actions' },
       h('button', { type: 'button', class: 'secondaire', onclick: () => dlg.close() }, 'Annuler'), valider)));
-  maj();
+  maj(false);
   dlg.showModal();
 }
 
 function ouvrirRegler(s, niveau) {
   const dlg = $('#dlg');
   const dette = s.solde < 0;          // l'élève nous doit de l'argent
-  const montant = h('input', { type: 'number', min: 1, max: Math.abs(s.solde), step: 50, inputmode: 'numeric', value: Math.abs(s.solde) });
+  const montant = h('input', { type: 'number', min: 1, max: Math.abs(s.solde), step: 1, inputmode: 'numeric', value: Math.abs(s.solde) });
   const mode = h('select', null, MODES.filter(m => m.v !== 'SEANCE').map(m => h('option', { value: m.v }, m.label)));
   const prec = h('input', { type: 'text', maxlength: 80, list: 'operateurs', autocomplete: 'off' });
   const lPrec = champForm('Application ou référence', prec);
@@ -443,8 +505,83 @@ function ouvrirRegler(s, niveau) {
   dlg.showModal();
 }
 
+function ouvrirInscription(s, niveau) {
+  const dlg = $('#dlg');
+  const lib = libelleInscription(s.categorie);
+  const reste = resteInscription(s, niveau);
+  const montant = h('input', { type: 'number', min: 1, max: reste, step: 1, inputmode: 'numeric', value: reste });
+  const mode = h('select', null, MODES.filter(m => m.v !== 'SEANCE').map(m => h('option', { value: m.v }, m.label)));
+  const prec = h('input', { type: 'text', maxlength: 80, list: 'operateurs', autocomplete: 'off' });
+  const lPrec = champForm('Application ou référence', prec);
+  const erreur = h('p', { class: 'erreur', role: 'alert' });
+  const valider = h('button', { type: 'submit', class: 'primaire' }, `Enregistrer ${lib.toLowerCase()}`);
+  const maj = () => { lPrec.hidden = mode.value === 'ESPECES'; };
+  mode.addEventListener('change', maj);
+  const ref = nouvelleRef();
+
+  async function envoyer(ev) {
+    ev.preventDefault();
+    const p = { niveau, id: s.id, montant: montant.value, mode: mode.value, precision: prec.value, ref };
+    try { calculerInscription(p, reste); } catch (e) { erreur.textContent = e.message; return; }
+    valider.disabled = true;
+    try { await operationCaisse('inscrire', p); dlg.close(); toast(`${lib} enregistrée.`); }
+    catch (e) { erreur.textContent = e.message; valider.disabled = false; }
+  }
+  dlg.replaceChildren(h('form', { class: 'params', onsubmit: envoyer },
+    h('h2', { id: 'dlg-titre' }, `${lib} : ${s.nom || '(sans nom)'}`),
+    h('p', null, `Il reste ${fcfa(reste)} sur ${fcfa(fraisDus(niveau, s.categorie))} pour ${lib.toLowerCase()} de cet élève.`),
+    champForm(`Montant versé maintenant (FCFA)`, montant),
+    champForm('Mode', mode), lPrec, erreur,
+    h('datalist', { id: 'operateurs' }, OPERATEURS.map(o => h('option', { value: o }))),
+    h('div', { class: 'actions' },
+      h('button', { type: 'button', class: 'secondaire', onclick: () => dlg.close() }, 'Annuler'), valider)));
+  maj();
+  dlg.showModal();
+}
+
+// Correction (admin, une seule fois, même jour) du mode de paiement d'une opération déjà enregistrée.
+function ouvrirModifierMode(o) {
+  const dlg = $('#dlg');
+  const mode = h('select', null, MODES.filter(m => m.v !== 'SEANCE').map(m => h('option', { value: m.v }, m.label)));
+  mode.value = o.mode;
+  const prec = h('input', { type: 'text', maxlength: 80, list: 'operateurs', autocomplete: 'off', value: o.precision || '' });
+  const lPrec = champForm('Application ou référence', prec);
+  const erreur = h('p', { class: 'erreur', role: 'alert' });
+  const valider = h('button', { type: 'submit', class: 'primaire' }, 'Corriger le mode');
+  const maj = () => { lPrec.hidden = mode.value === 'ESPECES'; };
+  mode.addEventListener('change', maj);
+  const ref = nouvelleRef();
+
+  async function envoyer(ev) {
+    ev.preventDefault();
+    valider.disabled = true;
+    try {
+      await operationCaisse('modifierMode', { niveau: o.niveau, cible: o.ref, mode: mode.value, precision: prec.value, ref });
+      dlg.close(); toast('Mode de paiement corrigé.');
+    } catch (e) { erreur.textContent = e.message; valider.disabled = false; }
+  }
+  dlg.replaceChildren(h('form', { class: 'params', onsubmit: envoyer },
+    h('h2', { id: 'dlg-titre' }, `Corriger le mode : ${o.nom || "l'élève"}`),
+    h('p', null, `Opération du ${dateFr()} enregistrée en « ${LIB_MODE[o.mode]} ». Cette correction n'est possible qu'une seule fois, le jour même.`),
+    champForm('Mode', mode), lPrec, erreur,
+    h('datalist', { id: 'operateurs' }, OPERATEURS.map(o => h('option', { value: o }))),
+    h('div', { class: 'actions' },
+      h('button', { type: 'button', class: 'secondaire', onclick: () => dlg.close() }, 'Annuler'), valider)));
+  maj();
+  dlg.showModal();
+}
+
 /* ---------- Vue « Séance » ---------- */
+// Un formateur ne peut actualiser que les niveaux où il a lui-même encaissé aujourd'hui ; l'admin peut toujours.
+function peutActualiser(niveau) {
+  return state.role === 'admin' || state.paiements.some(p =>
+    p.niveau === niveau && p.date === jour() && p.utilisateur === state.utilisateur && p.type !== 'ANNULATION');
+}
 async function actualiser() {
+  if (!peutActualiser(state.niveau)) {
+    toast(`Vous ne pouvez actualiser que les niveaux où vous avez encaissé aujourd'hui.`, true);
+    return;
+  }
   const msg = `Actualiser les séances de ${state.niveau} ?\n\n` +
     'Le tampon prend la valeur du nombre de séances et toutes les présences repassent à « En attente ». ' +
     'À faire une seule fois par séance, quand tous les formateurs ont fini de saisir.';
@@ -458,10 +595,11 @@ function ligneSeance(s) {
     h('span', { class: 'num' }, s.id),
     h('div', { class: 'identite' },
       h('strong', null, s.nom || '(sans nom)'),
+      s.categorie === 'CLUB' && h('span', { class: 'badge club' }, 'Club'),
       h('span', { class: 'detail' }, `Tampon : ${s.tampon}` + (s.avance ? `, ${s.avance} en avance` : '')),
-      boutonSolde(s, state.niveau)),
+      boutonSolde(s, state.niveau), boutonInscription(s, state.niveau)),
     chips(s),
-    paiementCellule(s),
+    paiementCellule(s, state.niveau),
     h('span', { class: 'total', title: 'Nombre de séances après la présence saisie' },
       h('b', null, seances(s)), h('small', null, 'Séances')));
 }
@@ -477,7 +615,9 @@ function vueSeance() {
       h('p', { class: 'bilan' },
         PRESENCES.map(p => h('span', { class: `pastille ${p.cls}` }, `${p.label} : ${cnt[p.v]}`)),
         h('span', { class: 'pastille' }, `Encaissés : ${payes}`)),
-      state.role === 'admin' && h('button', { type: 'button', class: 'secondaire', onclick: actualiser }, 'Actualiser les séances')),
+      h('button', { type: 'button', class: 'secondaire', onclick: actualiser, disabled: !peutActualiser(state.niveau),
+        title: peutActualiser(state.niveau) ? '' : "Vous ne pouvez actualiser que les niveaux où vous avez encaissé aujourd'hui." },
+        'Actualiser les séances')),
     l.length ? h('ul', { class: 'lignes' }, filtrer(l).map(ligneSeance)) : vide());
 }
 
@@ -510,25 +650,29 @@ function vueFiche() {
       h('div', { class: 'fiche-corps' },
         h('dl', { class: 'bloc ciel' },
           champ('Contact', s.contact || '—'), champ('E-mail', s.email || '—'),
-          champ("Niveau d'étude", state.niveau), champ('Filière', s.filiere || '—')),
+          champ("Niveau d'étude", state.niveau), champ('Filière', s.filiere || '—'),
+          champ('Catégorie', LIB_CATEGORIE[s.categorie])),
         h('dl', { class: 'bloc' },
           champ("Statut d'inscription", s.statut), champ('Séances en avance', s.avance),
           champ('Montant des avances', fcfa(s.avance * tarif)), champ('Séances non réglées', s.arriere),
           champ('Montant des arriérés', fcfa(s.arriere * tarif)), champ('Redevance', fcfa(s.redevance)),
           champ('Créance', fcfa(s.creance)),
-          champ('Solde', boutonSolde(s, state.niveau) || soldeTexte(s)))),
+          champ('Solde', boutonSolde(s, state.niveau) || soldeTexte(s)),
+          champ(libelleInscription(s.categorie), boutonInscription(s, state.niveau) ||
+            `Soldée (${fcfa(fraisDus(state.niveau, s.categorie))})`))),
       h('div', { class: 'fiche-pied' },
-        h('span', { class: 'lib' }, 'Présence du jour'), chips(s), paiementCellule(s))));
+        h('span', { class: 'lib' }, 'Présence du jour'), chips(s), paiementCellule(s, state.niveau))));
 }
 
 /* ---------- Vue « Base de données » ---------- */
-function ligneBase(s, admin) {
+function ligneBase(s, admin, niveau) {
   const tr = h('tr', { 'data-id': s.id });
   const maj = () => {
     const t = state.settings.tarif;
     tr.querySelector('.m-av').textContent = fcfa(s.avance * t);
     tr.querySelector('.m-ar').textContent = fcfa(s.arriere * t);
     tr.querySelector('.sc').textContent = seances(s);
+    tr.querySelector('.reste-insc').textContent = fcfa(resteInscription(s, niveau));
   };
   const modifier = (k, valeur) => {
     commit('updateStudent', { niveau: state.niveau, id: s.id, patch: { [k]: valeur } }, { silencieux: true });
@@ -554,6 +698,7 @@ function ligneBase(s, admin) {
     h('td', null, texte('email', 'email')),
     h('td', null, texte('filiere')),
     h('td', null, choix([['OUI', 'OUI'], ['NON', 'NON']], 'statut', e => modifier('statut', e.target.value))),
+    h('td', null, choix(CATEGORIES.map(c => [c.v, c.label]), 'categorie', e => modifier('categorie', e.target.value))),
     h('td', { class: 'nombre' }, nombre('avance')),
     h('td', { class: 'nombre m-av' }, fcfa(s.avance * state.settings.tarif)),
     h('td', { class: 'nombre' }, nombre('arriere')),
@@ -561,6 +706,8 @@ function ligneBase(s, admin) {
     h('td', { class: 'nombre' }, nombre('creance')),
     h('td', { class: 'nombre' }, nombre('redevance')),
     h('td', { class: 'nombre' }, soldeTexte(s)),
+    h('td', { class: 'nombre' }, nombre('inscription')),
+    h('td', { class: 'nombre reste-insc' }, fcfa(resteInscription(s, niveau))),
     h('td', null, choix(PRESENCES.map(p => [p.v, p.label]), 'presence', e => {
       commit('setPresence', { niveau: state.niveau, id: s.id, presence: e.target.value }, { silencieux: true });
       maj();
@@ -659,8 +806,9 @@ async function importerCSV(fichier) {
 function vueBase() {
   const admin = state.role === 'admin';
   const l = liste();
-  const entetes = ['N°', 'Nom et prénoms', 'Contact', 'E-mail', 'Filière', 'Statut', 'Séances en avance',
-    'Montant avances', 'Séances non réglées', 'Montant arriérés', 'Créance', 'Redevance', 'Solde', 'Présence',
+  const entetes = ['N°', 'Nom et prénoms', 'Contact', 'E-mail', 'Filière', 'Statut', 'Catégorie', 'Séances en avance',
+    'Montant avances', 'Séances non réglées', 'Montant arriérés', 'Créance', 'Redevance', 'Solde',
+    'Inscription/adhésion versée', 'Reste à payer', 'Présence',
     'Séances', 'Tampon', admin ? '' : null];
   const fichier = h('input', { type: 'file', accept: '.csv,text/csv', hidden: true,
     onchange: e => { if (e.target.files[0]) importerCSV(e.target.files[0]); e.target.value = ''; } });
@@ -680,7 +828,7 @@ function vueBase() {
     l.length
       ? h('div', { class: 'table-wrap' }, h('table', { class: 'base' },
           h('thead', null, h('tr', null, entetes.map(e => e !== null && h('th', { scope: 'col' }, e)))),
-          h('tbody', null, filtrer(l).map(s => ligneBase(s, admin)))))
+          h('tbody', null, filtrer(l).map(s => ligneBase(s, admin, state.niveau)))))
       : vide());
 }
 
@@ -708,10 +856,22 @@ async function annulerOperation(o) {
 function exporterCaisse(rows, date) {
   telechargerCSV([
     ['Date', 'Heure', 'Niveau', "N° d'ordre", 'Nom', 'Opération', 'Mode', 'Précision', 'Montant séance', 'Remis', 'Rendu',
-      'Encaissé net', 'Effet sur le solde', 'Séances en avance', 'Enregistré par', 'Annulée'],
+      'Encaissé net', 'Effet sur le solde', 'Séances en avance', 'Inscription/adhésion', 'Enregistré par', 'Mode corrigé', 'Annulée'],
     ...rows.map(r => [r.date, heure(r.horodatage), r.niveau, r.eleve, r.nom, LIB_TYPE[r.type], LIB_MODE[r.mode], r.precision,
-      r.du, r.recu, r.rendu, r.net, r.effetSolde, r.effetAvance, r.utilisateur, r.annulePar ? 'oui' : '']),
+      r.du, r.recu, r.rendu, r.net, r.effetSolde, r.effetAvance, r.effetInscription || 0, r.utilisateur,
+      r.modifie ? 'oui' : '', r.annulePar ? 'oui' : '']),
   ], `caisse_${date}.csv`);
+}
+
+// Catégorise une ligne de caisse : séance/règlement de solde, ou inscription/adhésion.
+// Une annulation reprend la catégorie de l'opération qu'elle annule.
+function categorieLigne(r, rows) {
+  if (r.type === 'INSCRIPTION') return 'inscription';
+  if (r.type === 'ANNULATION') {
+    const orig = rows.find(x => x.ref === r.annulationDe) || state.paiements.find(x => x.ref === r.annulationDe);
+    return orig && orig.type === 'INSCRIPTION' ? 'inscription' : 'seance';
+  }
+  return 'seance';
 }
 
 function vueCaisse() {
@@ -720,12 +880,22 @@ function vueCaisse() {
   const tous = state.caisseTous;
   const rows = paiementsDuJour(date).filter(r => tous || r.niveau === state.niveau)
     .sort((a, b) => String(a.horodatage).localeCompare(String(b.horodatage)));
-  const parMode = MODES.filter(m => m.v !== 'SEANCE').map(m => {
-    const rs = rows.filter(r => r.mode === m.v);
-    return { m, net: rs.reduce((t, r) => t + r.net, 0), n: rs.filter(r => r.type === 'ENCAISSEMENT' && !r.annulePar).length };
+  const rowsSeance = rows.filter(r => categorieLigne(r, rows) === 'seance');
+  const rowsInscription = rows.filter(r => categorieLigne(r, rows) === 'inscription');
+
+  const parModeDe = (lignes, typeCompte) => MODES.filter(m => m.v !== 'SEANCE').map(m => {
+    const rs = lignes.filter(r => r.mode === m.v);
+    return { m, net: rs.reduce((t, r) => t + r.net, 0), n: rs.filter(r => r.type === typeCompte && !r.annulePar).length };
   });
-  const total = parMode.reduce((t, x) => t + x.net, 0);
-  const viaSeance = rows.filter(r => r.type === 'ENCAISSEMENT' && r.mode === 'SEANCE' && !r.annulePar).length;
+  const parMode = parModeDe(rowsSeance, 'ENCAISSEMENT');
+  const totalSeance = parMode.reduce((t, x) => t + x.net, 0);
+  const viaSeance = rowsSeance.filter(r => r.type === 'ENCAISSEMENT' && r.mode === 'SEANCE' && !r.annulePar).length;
+
+  const parModeInscription = parModeDe(rowsInscription, 'INSCRIPTION');
+  const totalInscription = parModeInscription.reduce((t, x) => t + x.net, 0);
+
+  const totalGeneral = totalSeance + totalInscription;
+
   const eleves = (tous ? NIVEAUX : [state.niveau]).flatMap(n => state.data[n].map(s => ({ n, s })));
   const aRendre = eleves.filter(x => x.s.solde > 0), aEncaisser = eleves.filter(x => x.s.solde < 0);
   const somme = l => l.reduce((t, x) => t + Math.abs(x.s.solde), 0);
@@ -737,6 +907,15 @@ function vueCaisse() {
       h('button', { type: 'button', class: 'secondaire', onclick: () => ouvrirRegler(s, n) }, action))))
       : h('p', { class: 'detail' }, 'Aucun.'));
 
+  const tableRecap = (titre, lignes, total, pied) => h('section', { class: 'recap' },
+    h('h3', null, titre),
+    h('table', null,
+      h('thead', null, h('tr', null, ['Mode', 'Opérations', 'Net'].map(t => h('th', { scope: 'col' }, t)))),
+      h('tbody', null,
+        lignes.map(x => h('tr', null, h('td', null, x.m.label), h('td', { class: 'nombre' }, x.n), h('td', { class: 'nombre' }, fcfa(x.net)))),
+        pied),
+      h('tfoot', null, h('tr', null, h('th', null, 'Sous-total'), h('td', null), h('td', { class: 'nombre' }, fcfa(total))))));
+
   return h('div', null,
     h('div', { class: 'barre' },
       h('label', { class: 'cf ligne-h' }, h('span', null, 'Jour'),
@@ -745,30 +924,33 @@ function vueCaisse() {
         onchange: e => { state.caisseTous = e.target.checked; render(); } }), 'Tous les niveaux'),
       h('span', { class: 'bilan' }),
       h('button', { type: 'button', class: 'secondaire', disabled: !rows.length, onclick: () => exporterCaisse(rows, date) }, 'Exporter en CSV')),
-    h('section', { class: 'recap' },
-      h('table', null,
-        h('thead', null, h('tr', null, ['Mode', 'Séances payées', 'Encaissé net'].map(t => h('th', { scope: 'col' }, t)))),
-        h('tbody', null,
-          parMode.map(x => h('tr', null, h('td', null, x.m.label), h('td', { class: 'nombre' }, x.n), h('td', { class: 'nombre' }, fcfa(x.net)))),
-          h('tr', null, h('td', null, LIB_MODE.SEANCE), h('td', { class: 'nombre' }, viaSeance), h('td', { class: 'nombre' }, '—'))),
-        h('tfoot', null, h('tr', null, h('th', null, 'Total encaissé'), h('td', null), h('td', { class: 'nombre' }, fcfa(total))))),
-      h('p', { class: 'detail' }, "Encaissé net = montants remis moins monnaie rendue, plus les règlements de soldes payés par les élèves, moins ceux rendus aux élèves.")),
+    h('div', { class: 'deux' },
+      tableRecap('Séances (espèces, Wave, autre application)', parMode, totalSeance,
+        h('tr', null, h('td', null, LIB_MODE.SEANCE), h('td', { class: 'nombre' }, viaSeance), h('td', { class: 'nombre' }, '—'))),
+      tableRecap('Inscriptions et adhésions', parModeInscription, totalInscription)),
+    h('p', { class: 'total-general' }, 'Total général de la journée : ', h('b', null, fcfa(totalGeneral))),
+    h('p', { class: 'detail' }, "Net = montants remis moins monnaie rendue, plus les règlements de soldes payés par les élèves, moins ceux rendus aux élèves."),
     h('div', { class: 'deux' },
       listeSoldes('Monnaie à rendre aux élèves', aRendre, 'Rendre'),
       listeSoldes('À encaisser auprès des élèves', aEncaisser, 'Encaisser')),
     rows.length ? h('div', { class: 'table-wrap' }, h('table', null,
-      h('thead', null, h('tr', null, ['Heure', 'Élève', 'Opération', 'Mode', 'Remis', 'Rendu', 'Encaissé net', 'Solde', 'Par', '']
+      h('thead', null, h('tr', null, ['Heure', 'Élève', 'Opération', 'Mode', 'Remis', 'Rendu', 'Net', 'Solde', 'Par', '']
         .map(t => h('th', { scope: 'col' }, t)))),
-      h('tbody', null, rows.map(r => h('tr', { class: r.annulePar || r.type === 'ANNULATION' ? 'annule' : null },
-        h('td', null, heure(r.horodatage)),
-        h('td', null, `${tous ? r.niveau + ' – ' : ''}${r.nom}`),
-        h('td', null, LIB_TYPE[r.type]),
-        h('td', null, libPaiement(r) + (r.mode === 'WAVE' && r.precision ? ` (${r.precision})` : '')),
-        h('td', { class: 'nombre' }, r.recu), h('td', { class: 'nombre' }, r.rendu), h('td', { class: 'nombre' }, r.net),
-        h('td', { class: 'nombre' }, r.effetSolde), h('td', null, r.utilisateur),
-        h('td', null, r.type !== 'ANNULATION' && !r.annulePar && h('button', { type: 'button', class: 'secondaire danger',
-          onclick: () => annulerOperation(r) }, 'Annuler'))))))
-      ) : h('div', { class: 'vide' }, h('p', null, 'Aucune opération ce jour-là.')));
+      h('tbody', null, rows.map(r => {
+        const corrigeable = r.type !== 'ANNULATION' && !r.annulePar && r.mode !== 'SEANCE' && !r.modifie && r.date === aujourdhui();
+        return h('tr', { class: r.annulePar || r.type === 'ANNULATION' ? 'annule' : null },
+          h('td', null, heure(r.horodatage)),
+          h('td', null, `${tous ? r.niveau + ' – ' : ''}${r.nom}`),
+          h('td', null, LIB_TYPE[r.type]),
+          h('td', null, libPaiement(r) + (r.mode === 'WAVE' && r.precision ? ` (${r.precision})` : '') + (r.modifie ? ' (corrigé)' : '')),
+          h('td', { class: 'nombre' }, r.recu), h('td', { class: 'nombre' }, r.rendu), h('td', { class: 'nombre' }, r.net),
+          h('td', { class: 'nombre' }, r.effetSolde), h('td', null, r.utilisateur),
+          h('td', { class: 'actions-ligne' },
+            r.type !== 'ANNULATION' && !r.annulePar && h('button', { type: 'button', class: 'secondaire danger',
+              onclick: () => annulerOperation(r) }, 'Annuler'),
+            corrigeable && h('button', { type: 'button', class: 'secondaire', onclick: () => ouvrirModifierMode(r) }, 'Corriger le mode')));
+      }))))
+      : h('div', { class: 'vide' }, h('p', null, 'Aucune opération ce jour-là.')));
 }
 
 /* ---------- Connexion et paramètres ---------- */
