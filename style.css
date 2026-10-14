@@ -207,3 +207,11 @@ tfoot th, tfoot td { border-top: 2px solid var(--encre); font-weight: 700; }
 .soldes li span { flex: 1; overflow-wrap: anywhere; }
 tr.annule td { color: var(--gris); text-decoration: line-through; }
 tr.annule td:last-child { text-decoration: none; }
+
+/* Catégorie Club, inscription/adhésion, correction de caisse */
+.badge.club { align-self: flex-start; padding: 1px 8px; border-radius: 999px; background: #E6D9F7; color: #5B2A91; font-size: .75rem; font-weight: 700; }
+.gratuit { display: inline-block; padding: 6px 10px; border-radius: var(--rayon); background: #E6D9F7; color: #5B2A91; font-weight: 700; text-align: center; }
+button.solde.inscription { background: #D7E8FB; color: #0B4A8F; }
+.recap h3 { font-size: 1rem; margin: 0 0 4px; }
+.total-general { font-size: 1.05rem; font-weight: 700; margin: -8px 0 12px; }
+.actions-ligne { display: flex; gap: 6px; flex-wrap: wrap; }
